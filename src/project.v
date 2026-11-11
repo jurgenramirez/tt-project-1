@@ -1,68 +1,121 @@
 /*
- * Copyright (c) 2024 Uri Shaked
+ * Semáforo inteligente
+ * Copyright (c) 2026 Jurgen Ramirez
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * Traducción directa del diagrama de Wokwi: cada señal lleva el mismo id que
+ * la compuerta o flip-flop del diagram.json (a1, en, x0, mr, ff_q0, ...).
+ *
+ * Analogía de programación:
+ *   - Los "reg" (flip-flops) son variables que solo cambian en el flanco de
+ *     subida del reloj, todas a la vez (asignación simultánea al final del ciclo).
+ *   - Los "assign" son expresiones booleanas que se evalúan en paralelo,
+ *     todo el tiempo, como compuertas conectadas con cables.
+ *
+ * Un estado por ciclo de reloj (en Wokwi: reloj de 1 Hz = un estado por segundo).
+ *
+ *   Contador  Fase                 Principal  Secundaria  Peatón
+ *   0-6       Verde principal      verde      rojo        rojo
+ *   7         Espera (si req=0)    verde      rojo        rojo
+ *   8-9       Amarillo principal   amarillo   rojo        rojo
+ *   10-14     Cruce                rojo       verde       verde
+ *   15        Amarillo secundaria  rojo       amarillo    rojo
  */
 
 `default_nettype none
 
-module tt_um_jurgenramirez_lights(
-  input  wire [7:0] ui_in,    // Dedicated inputs
-  output wire [7:0] uo_out,   // Dedicated outputs
-  input  wire [7:0] uio_in,   // IOs: Input path
-  output wire [7:0] uio_out,  // IOs: Output path
-  output wire [7:0] uio_oe,   // IOs: Enable path (active high: 0=input, 1=output)
-  input  wire       ena,      // always 1 when the design is powered, so you can ignore it
-  input  wire       clk,      // clock
-  input  wire       rst_n     // reset_n - low to reset
+module tt_um_jurgenramirez_semaforo (
+    input  wire [7:0] ui_in,    // Entradas dedicadas
+    output wire [7:0] uo_out,   // Salidas dedicadas
+    input  wire [7:0] uio_in,   // Bidireccionales: entrada (sin usar)
+    output wire [7:0] uio_out,  // Bidireccionales: salida (sin usar)
+    output wire [7:0] uio_oe,   // Bidireccionales: habilitación (0 = entrada)
+    input  wire       ena,      // Siempre 1 cuando el diseño está activo
+    input  wire       clk,      // Reloj: un estado por flanco de subida
+    input  wire       rst_n     // Reset activo en bajo
 );
 
-  // VGA signals
-  wire hsync;
-  wire vsync;
-  wire [1:0] R;
-  wire [1:0] G;
-  wire [1:0] B;
-  wire video_active;
-  wire [9:0] pix_x;
-  wire [9:0] pix_y;
+  // ---------------- Entradas ----------------
+  wire in0 = ui_in[0];  // DIP 1: botón peatonal
+  wire in1 = ui_in[1];  // DIP 2: sensor de carro en la calle secundaria
 
-  // TinyVGA PMOD
-  assign uo_out = {hsync, B[0], G[0], R[0], vsync, B[1], G[1], R[1]};
+  // nrst: NOT del reset; va a la entrada R de todos los flip-flops
+  wire nrst = ~rst_n;
 
-  // Unused outputs assigned to 0.
-  assign uio_out = 0;
-  assign uio_oe  = 0;
+  // ---------------- Flip-flops (estado) ----------------
+  // ff_q0..ff_q3: contador de 4 bits Q3..Q0.  ff_req: hay alguien esperando.
+  reg q0, q1, q2, q3, req;
+  wire d0, d1, d2, d3, d_req;
 
-  // Suppress unused signals warning
-  wire _unused_ok = &{ena, ui_in, uio_in};
-
-  reg [9:0] counter;
-
-  hvsync_generator hvsync_gen(
-    .clk(clk),
-    .reset(~rst_n),
-    .hsync(hsync),
-    .vsync(vsync),
-    .display_on(video_active),
-    .hpos(pix_x),
-    .vpos(pix_y)
-  );
-  
-  wire [9:0] moving_x = pix_x + counter;
-
-  assign R = video_active ? {moving_x[5], pix_y[2]} : 2'b00;
-  assign G = video_active ? {moving_x[6], pix_y[2]} : 2'b00;
-  assign B = video_active ? {moving_x[7], pix_y[5]} : 2'b00;
-  
-  always @(posedge vsync, negedge rst_n) begin
-    if (~rst_n) begin
-      counter <= 0;
+  // Igual que wokwi-flip-flop-dr: reset asíncrono activo en alto (R).
+  always @(posedge clk or posedge nrst) begin
+    if (nrst) begin
+      q0  <= 1'b0;
+      q1  <= 1'b0;
+      q2  <= 1'b0;
+      q3  <= 1'b0;
+      req <= 1'b0;
     end else begin
-      counter <= counter + 1;
+      q0  <= d0;
+      q1  <= d1;
+      q2  <= d2;
+      q3  <= d3;
+      req <= d_req;
     end
   end
 
-  // Suppress unused signals warning
-  wire _unused_ok_ = &{moving_x, pix_y};
+  // ---------------- Lógica de transición ----------------
+  // Detectar el estado 7 (0111)
+  wire a1  = q0 & q1;         // a1
+  wire a2  = a1 & q2;         // a2
+  wire at7 = a2 & ~q3;        // at7 (usa NOTQ de ff_q3)
+
+  // EN = 0 solo en el estado 7 sin solicitud: el contador se detiene ahí
+  wire en  = ~(at7 & ~req);   // en (NAND, usa NOTQ de ff_req)
+
+  // Incrementador con habilitación: acarreos
+  wire c1 = en & q0;          // c1
+  wire c2 = c1 & q1;          // c2
+  wire c3 = c2 & q2;          // c3
+
+  // Siguiente estado: cada bit cambia si le llega acarreo
+  assign d0 = q0 ^ en;        // x0
+  assign d1 = q1 ^ c1;        // x1
+  assign d2 = q2 ^ c2;        // x2
+  assign d3 = q3 ^ c3;        // x3
+
+  // ---------------- Luces (Moore: dependen solo del estado) ----------------
+  wire q21  = q2 | q1;        // q21
+  wire mr   = q3 & q21;       // mr:   principal rojo (estados 10-15)
+  wire nq21 = ~q21;           // nq21
+  wire my   = q3 & nq21;      // my:   principal amarillo (estados 8-9)
+  wire sy   = a2 & q3;        // sy:   secundaria amarillo (estado 15)
+  wire nsy  = ~sy;            // nsy
+  wire sg   = mr & nsy;       // sg:   secundaria verde = peatón verde (10-14)
+  wire nmr  = ~mr;            // nmr:  secundaria rojo (estados 0-9)
+  wire nsg  = ~sg;            // nsg:  peatón rojo
+
+  // ---------------- Memoria de solicitud ----------------
+  // Se activa con el botón o el sensor, se mantiene, y se borra en el cruce.
+  wire o1 = in0 | in1;        // o1
+  wire o2 = o1 | req;         // o2
+  assign d_req = o2 & nmr;    // dreq
+
+  // ---------------- Salidas ----------------
+  assign uo_out[0] = mr;      // Principal rojo
+  assign uo_out[1] = my;      // Principal amarillo
+  assign uo_out[2] = ~q3;     // Principal verde (NOTQ de ff_q3)
+  assign uo_out[3] = nmr;     // Secundaria rojo
+  assign uo_out[4] = sy;      // Secundaria amarillo
+  assign uo_out[5] = sg;      // Secundaria verde
+  assign uo_out[6] = sg;      // Peatón verde
+  assign uo_out[7] = nsg;     // Peatón rojo
+
+  // Pines bidireccionales sin usar: todos como entrada
+  assign uio_out = 8'b0;
+  assign uio_oe  = 8'b0;
+
+  // Evitar advertencias por entradas sin usar
+  wire _unused = &{ena, ui_in[7:2], uio_in, 1'b0};
 
 endmodule
